@@ -6,10 +6,6 @@ using SharpAppLocker.Output;
 
 /*
  * Feature TODO List
- * Parse and display rules from files
- * Support ability to look at files directly where theyve been extracted from another system
- * Filter by ruleset type
- * Filter by allow / deny
  * Identify all related to current user (user, or groups, etc)
  * Identify rules related to a specific SID
  * Identify potential global bypasses
