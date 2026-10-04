@@ -46,11 +46,15 @@
         <Reference Include="System.DirectoryServices.AccountManagement" />
     </ItemGroup>
     <ItemGroup>
+        <Compile Include="Analysis\BypassTester.cs" />
+        <Compile Include="Analysis\PolicyAnalyser.cs" />
         <Compile Include="Analysis\PolicyResolver.cs" />
         <Compile Include="Interop\AppIdPolicyHandler.cs" />
         <Compile Include="Interop\IAppIdPolicyHandler.cs" />
         <Compile Include="Interop\NativeMethods.cs" />
         <Compile Include="Model\PolicyModel.cs" />
+        <Compile Include="Output\BypassPrinter.cs" />
+        <Compile Include="Output\FindingsPrinter.cs" />
         <Compile Include="Output\PolicyPrinter.cs" />
         <Compile Include="Program.cs"/>
         <Compile Include="Properties\AssemblyInfo.cs"/>

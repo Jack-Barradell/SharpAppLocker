@@ -14,9 +14,9 @@ using SharpAppLocker.Sources;
  * Filter by allow / deny
  * Identify all related to current user (user, or groups, etc)       [done: --me]
  * Identify rules related to a specific SID / principal              [done: --sid / --applies-to]
- * Identify potential global bypasses
- * Identify potentially weak rules ( *s, stuff in writable paths)
- * Test for bypasses locally
+ * Identify potential global bypasses                                [done: --audit]
+ * Identify potentially weak rules ( *s, stuff in writable paths)    [done: --audit]
+ * Test for bypasses locally                                         [done: --test-bypass]
  */
 
 namespace SharpAppLocker
@@ -42,6 +42,8 @@ namespace SharpAppLocker
             string ldap       = null;
             string dir        = @"C:\Windows\System32\AppLocker";
             bool   enforcementFromRegistry = false;
+            bool   audit      = false;
+            bool   testBypass = false;
 
             OptionSet options = new OptionSet()
                 .Add("m|mode=", "com|file (default: com)", v => mode = v)
@@ -56,7 +58,10 @@ namespace SharpAppLocker
                 .Add("ldap=", "com: LDAP path (required for --scope domain)", v => ldap = v)
                 // file mode
                 .Add("dir=", "file: folder of .AppLocker files (default: %WINDIR%\\System32\\AppLocker)", v => dir = v)
-                .Add("enforcement-from-registry", "file: read EnforcementMode from the registry (default off; it's not stored in the .AppLocker file)", v => enforcementFromRegistry = v != null);
+                .Add("enforcement-from-registry", "file: read EnforcementMode from the registry (default off; it's not stored in the .AppLocker file)", v => enforcementFromRegistry = v != null)
+                // analysis
+                .Add("audit", "review the policy for weak rules / bypass surface and exit", v => audit = v != null)
+                .Add("test-bypass", "test whether allowed locations are actually user-writable (local fs ACLs) and exit", v => testBypass = v != null);
 
             try
             {
@@ -98,6 +103,21 @@ namespace SharpAppLocker
                 if (raw)
                 {
                     Console.WriteLine(source.LoadXml());
+                    return;
+                }
+
+                if (audit)
+                {
+                    FindingsPrinter.Print(PolicyAnalyser.Analyse(source.Load(), collection));
+                    return;
+                }
+
+                if (testBypass)
+                {
+                    ISet<string> who = appliesTo != null ? PrincipalResolver.ForPrincipal(appliesTo)
+                                     : sid != null       ? PrincipalResolver.Exact(sid)
+                                     :                      PrincipalResolver.CurrentUser();
+                    BypassPrinter.Print(BypassTester.Test(source.Load(), collection, who));
                     return;
                 }
 
