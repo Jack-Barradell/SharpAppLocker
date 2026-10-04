@@ -46,11 +46,13 @@
     <ItemGroup>
         <Compile Include="Interop\AppIdPolicyHandler.cs" />
         <Compile Include="Interop\IAppIdPolicyHandler.cs" />
+        <Compile Include="Interop\NativeMethods.cs" />
         <Compile Include="Model\PolicyModel.cs" />
         <Compile Include="Output\PolicyPrinter.cs" />
         <Compile Include="Program.cs"/>
         <Compile Include="Properties\AssemblyInfo.cs"/>
         <Compile Include="Sources\ComPolicySource.cs" />
+        <Compile Include="Sources\FilePolicySource.cs" />
         <Compile Include="Sources\IPolicySource.cs" />
     </ItemGroup>
     <ItemGroup>

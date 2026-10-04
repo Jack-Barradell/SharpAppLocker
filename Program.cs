@@ -6,7 +6,6 @@ using SharpAppLocker.Output;
 
 /*
  * Feature TODO List
- * Parse and display rules from COM
  * Parse and display rules from files
  * Support ability to look at files directly where theyve been extracted from another system
  * Filter by ruleset type
@@ -108,8 +107,7 @@ namespace SharpAppLocker
                 case "com":
                     return new ComPolicySource(scope, ldap);
                 case "file":
-                    // return new FilePolicySource(dir);
-                    throw new NotImplementedException("file mode not written yet");
+                    return new FilePolicySource(dir);
                 default:
                     throw new OptionException("Unknown mode: " + mode, "mode");
             }
