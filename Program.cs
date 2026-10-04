@@ -2,22 +2,9 @@ using System;
 using System.Collections.Generic;
 using Mono.Options;
 using SharpAppLocker.Analysis;
+using SharpAppLocker.Model;
 using SharpAppLocker.Output;
 using SharpAppLocker.Sources;
-
-/*
- * Feature TODO List
- * Parse and display rules from COM                                  [done]
- * Parse and display rules from files                                [done]
- * Support ability to look at files extracted from another system    [done: --mode file --dir]
- * Filter by ruleset type                                            [done: --collection]
- * Filter by allow / deny
- * Identify all related to current user (user, or groups, etc)       [done: --me]
- * Identify rules related to a specific SID / principal              [done: --sid / --applies-to]
- * Identify potential global bypasses                                [done: --audit]
- * Identify potentially weak rules ( *s, stuff in writable paths)    [done: --audit]
- * Test for bypasses locally                                         [done: --test-bypass]
- */
 
 namespace SharpAppLocker
 {
@@ -44,6 +31,8 @@ namespace SharpAppLocker
             bool   enforcementFromRegistry = false;
             bool   audit      = false;
             bool   testBypass = false;
+            string action     = null;   // allow|deny filter for the listing
+            bool   json       = false;
 
             OptionSet options = new OptionSet()
                 .Add("m|mode=", "com|file (default: com)", v => mode = v)
@@ -51,7 +40,9 @@ namespace SharpAppLocker
                 .Add("s|sid=", "exact: only rules targeting this SID/account", v => sid = v)
                 .Add("me", "filter to rules that apply to the current user (incl. groups)", v => forMe = v != null)
                 .Add("applies-to=", "filter to rules that apply to this user/group (expands groups)", v => appliesTo = v)
+                .Add("a|action=", "listing filter: allow|deny (default: both)", v => action = v)
                 .Add("r|raw", "dump raw XML (com) / records (file) and exit", v => raw = v != null)
+                .Add("json", "emit machine-readable JSON instead of text", v => json = v != null)
                 .Add("h|help", "show this help and exit", v => help = v != null)
                 // com mode
                 .Add("scope=", "com: effective|local|domain (default: effective)", v => scope = v)
@@ -85,6 +76,10 @@ namespace SharpAppLocker
                 int principalOpts = (forMe ? 1 : 0) + (appliesTo != null ? 1 : 0) + (sid != null ? 1 : 0);
                 if (principalOpts > 1)
                     throw new OptionException("use only one of --me, --applies-to, --sid", "me");
+
+                if (action != null && !action.Equals("allow", StringComparison.OrdinalIgnoreCase)
+                                   && !action.Equals("deny", StringComparison.OrdinalIgnoreCase))
+                    throw new OptionException("--action must be 'allow' or 'deny'", "action");
             }
             catch (OptionException e)
             {
@@ -108,7 +103,9 @@ namespace SharpAppLocker
 
                 if (audit)
                 {
-                    FindingsPrinter.Print(PolicyAnalyser.Analyse(source.Load(), collection));
+                    List<Finding> findings = PolicyAnalyser.Analyse(source.Load(), collection);
+                    if (json) JsonPrinter.PrintFindings(findings);
+                    else FindingsPrinter.Print(findings);
                     return;
                 }
 
@@ -117,7 +114,9 @@ namespace SharpAppLocker
                     ISet<string> who = appliesTo != null ? PrincipalResolver.ForPrincipal(appliesTo)
                                      : sid != null       ? PrincipalResolver.Exact(sid)
                                      :                      PrincipalResolver.CurrentUser();
-                    BypassPrinter.Print(BypassTester.Test(source.Load(), collection, who));
+                    List<BypassResult> hits = BypassTester.Test(source.Load(), collection, who);
+                    if (json) JsonPrinter.PrintBypass(hits);
+                    else BypassPrinter.Print(hits);
                     return;
                 }
 
@@ -129,7 +128,9 @@ namespace SharpAppLocker
                 else if (sid != null)
                     matchSids = PrincipalResolver.Exact(sid);
 
-                PolicyPrinter.Print(source.Load(), collection, matchSids);
+                PolicyDocument loaded = source.Load();
+                if (json) JsonPrinter.PrintPolicy(loaded, collection, matchSids, action);
+                else PolicyPrinter.Print(loaded, collection, matchSids, action);
             }
             catch (Exception e)
             {

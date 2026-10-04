@@ -55,6 +55,8 @@
         <Compile Include="Model\PolicyModel.cs" />
         <Compile Include="Output\BypassPrinter.cs" />
         <Compile Include="Output\FindingsPrinter.cs" />
+        <Compile Include="Output\Json.cs" />
+        <Compile Include="Output\JsonPrinter.cs" />
         <Compile Include="Output\PolicyPrinter.cs" />
         <Compile Include="Program.cs"/>
         <Compile Include="Properties\AssemblyInfo.cs"/>
