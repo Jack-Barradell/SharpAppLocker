@@ -2,61 +2,81 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
+using Microsoft.Win32;
 using SharpAppLocker.Interop;
 using SharpAppLocker.Model;
 
 namespace SharpAppLocker.Sources
 {
+    /// <summary>
+    /// Reads the compiled .AppLocker policy files (one per collection, e.g. Exe.AppLocker) from
+    /// C:\Windows\System32\AppLocker - or a folder of files copied from another machine.
+    ///
+    /// The file carries a metadata section (UTF-16LE text) with one record per rule:
+    ///     {rule GUID}{per-rule SDDL "D:(...)"}{friendly name}
+    /// repeated. We parse those directly, recovering Id, Name, Action, SID and condition -
+    /// including exceptions (SDDL "&& (!(...))") and excluding the two structural LowBox/LPAC
+    /// ACEs at the tail (they carry no GUID, so the GUID-anchored scan skips them).
+    ///
+    /// EnforcementMode is NOT stored in these files; it lives in the registry and AppCache.dat.
+    /// Reading it is opt-in (--enforcement-from-registry) and off by default, so file mode stays
+    /// a pure file parser unless you ask otherwise.
+    /// </summary>
     internal sealed class FilePolicySource : IPolicySource
     {
-        private const int SdOffsetLocation = 16;   // DWORD at this offset = file offset of the SD
+        private const string SrpV2Key = @"SOFTWARE\Policies\Microsoft\Windows\SrpV2";
+
+        private static readonly Regex GuidRx = new Regex(
+            @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            RegexOptions.Compiled);
 
         private readonly string _dir;
+        private readonly bool _useRegistry;
 
-        public FilePolicySource(string dir)
+        public FilePolicySource(string dir, bool useRegistry)
         {
             _dir = dir;
+            _useRegistry = useRegistry;
         }
-        
+
+        // --- raw view: the metadata records (GUID / SDDL / name) per file --------------------
         public string LoadXml()
         {
             StringBuilder sb = new StringBuilder();
             foreach (string file in EnumerateFiles())
             {
                 sb.AppendLine("==== " + Path.GetFileName(file) + " ====");
-                byte[] bytes = File.ReadAllBytes(file);
-                sb.AppendLine("header: " + HexDump(bytes, 0, Math.Min(32, bytes.Length)));
-                try
+                string text = ReadUtf16(file);
+                foreach (Record rec in ReadRecords(text))
                 {
-                    sb.AppendLine(ExtractSddl(bytes));
-                }
-                catch (Exception e)
-                {
-                    sb.AppendLine("  [!] could not extract SDDL: " + e.Message);
+                    sb.AppendLine(rec.Id + "  " + rec.Name);
+                    sb.AppendLine("    " + rec.Sddl);
                 }
                 sb.AppendLine();
             }
             return sb.ToString();
         }
-        
+
+        // --- parsed view: into the shared model ---------------------------------------------
         public PolicyDocument Load()
         {
             PolicyDocument doc = new PolicyDocument { Version = "1 (from file)" };
 
             foreach (string file in EnumerateFiles())
             {
+                string type = Path.GetFileNameWithoutExtension(file);   // Exe.AppLocker -> Exe
                 RuleCollection collection = new RuleCollection
                 {
-                    Type = CollectionTypeFromFileName(file),
-                    EnforcementMode = "Unknown (not decoded from file header yet)"
+                    Type = type,
+                    EnforcementMode = ReadEnforcementMode(type)
                 };
 
                 try
                 {
-                    byte[] bytes = File.ReadAllBytes(file);
-                    string sddl = ExtractSddl(bytes);
-                    foreach (Rule r in ParseAces(sddl))
-                        collection.Rules.Add(r);
+                    string text = ReadUtf16(file);
+                    foreach (Record rec in ReadRecords(text))
+                        collection.Rules.Add(BuildRule(rec));
                 }
                 catch (Exception e)
                 {
@@ -67,115 +87,138 @@ namespace SharpAppLocker.Sources
             }
             return doc;
         }
-        
+
+        // --- file discovery -----------------------------------------------------------------
         private IEnumerable<string> EnumerateFiles()
         {
+            if (!Environment.Is64BitProcess && Environment.Is64BitOperatingSystem)
+                Console.Error.WriteLine(
+                    "[!] warning: running 32-bit on 64-bit Windows - System32 is redirected to SysWOW64. " +
+                    "Build x64, or use C:\\Windows\\Sysnative instead of System32.");
+
             if (!Directory.Exists(_dir))
                 throw new DirectoryNotFoundException("AppLocker folder not found: " + _dir);
 
-            // The live OS names them <Collection>.AppLocker; copied-off files keep that name.
             string[] files = Directory.GetFiles(_dir, "*.AppLocker");
             if (files.Length == 0)
                 Console.Error.WriteLine("[!] no *.AppLocker files in " + _dir);
             return files;
         }
 
-        private static string CollectionTypeFromFileName(string path)
+        private static string ReadUtf16(string file)
         {
-            // Exe.AppLocker -> Exe
-            return Path.GetFileNameWithoutExtension(path);
+            // Decode the whole file as UTF-16LE; binary sections become noise but the metadata
+            // records (GUID/SDDL/name) are plain text and are what we scan for.
+            return Encoding.Unicode.GetString(File.ReadAllBytes(file));
         }
-        
-        private static string ExtractSddl(byte[] bytes)
+
+        // --- metadata record extraction -----------------------------------------------------
+        private sealed class Record
         {
-            if (bytes.Length < SdOffsetLocation + 4)
-                throw new InvalidDataException("file too small to contain an SD offset");
-
-            int sdOffset = BitConverter.ToInt32(bytes, SdOffsetLocation);
-            if (sdOffset <= 0 || sdOffset >= bytes.Length)
-                throw new InvalidDataException("SD offset out of range: " + sdOffset);
-
-            // SD revision byte sanity check (self-relative SD starts with revision 0x01).
-            if (bytes[sdOffset] != 0x01)
-                throw new InvalidDataException(
-                    "byte at SD offset is 0x" + bytes[sdOffset].ToString("X2") + ", expected 0x01");
-
-            // Copy from the SD offset to the end; the converter reads only what it needs.
-            int len = bytes.Length - sdOffset;
-            byte[] sd = new byte[len];
-            Array.Copy(bytes, sdOffset, sd, 0, len);
-
-            return NativeMethods.SecurityDescriptorToSddl(sd);
+            public string Id;
+            public string Sddl;
+            public string Name;
         }
-        
-        private static IEnumerable<Rule> ParseAces(string sddl)
-        {
-            List<Rule> rules = new List<Rule>();
 
-            // sddl looks like: D:ARAI(XA;;0x1fffffff;;;WD;(Exists APPID://PATH ...))(XD;;...)...
-            foreach (string aceBody in SplitTopLevelGroups(DaclPortion(sddl)))
+        private static IEnumerable<Record> ReadRecords(string text)
+        {
+            List<Record> records = new List<Record>();
+            MatchCollection guids = GuidRx.Matches(text);
+
+            for (int i = 0; i < guids.Count; i++)
             {
-                List<string> f = SplitFields(aceBody);
-                if (f.Count < 6)
-                    continue;
+                int start = guids[i].Index;
+                string id = text.Substring(start, 36);
+                int end = (i + 1 < guids.Count) ? guids[i + 1].Index : text.Length;
+                string chunk = text.Substring(start + 36, end - (start + 36));
 
-                string aceType = f[0];
-                string action = AceTypeToAction(aceType);
-                if (action == null)
-                    continue;   // not an allow/deny rule ACE (e.g. audit)
+                string sddl, name;
+                SplitSddlAndName(chunk, out sddl, out name);
+                if (sddl == null)
+                    continue;   // not a rule record
 
-                string sidToken = f[5];
-                string condition = f.Count >= 7 ? StripOuterParens(f[6]) : "";
-
-                rules.Add(new Rule
-                {
-                    Kind = KindFromCondition(condition),
-                    Id = Guid.Empty,                 // not stored in the compiled form
-                    Name = "",                       // names are stripped on compilation
-                    Description = "",
-                    Sid = NativeMethods.NormaliseSid(sidToken),
-                    Action = action,
-                    Inclusions = { new Condition { Kind = "SddlCondition", Summary = condition } }
-                });
+                records.Add(new Record { Id = id, Sddl = sddl, Name = name });
             }
-            return rules;
+            return records;
         }
 
-        private static string DaclPortion(string sddl)
+        /// <summary>
+        /// A chunk after a GUID looks like: D:(....)) &lt;friendly name&gt;.
+        /// Balance-match the SDDL from "D:(" to its closing paren; the rest is the name,
+        /// trimmed where the trailing structural ACE text ("Applocker Private...") begins.
+        /// </summary>
+        private static void SplitSddlAndName(string chunk, out string sddl, out string name)
         {
-            // Trim anything before "D:"; we only requested the DACL so this is usually the whole string.
-            int d = sddl.IndexOf("D:", StringComparison.Ordinal);
-            return d < 0 ? sddl : sddl.Substring(d + 2);
-        }
-        
-        private static IEnumerable<string> SplitTopLevelGroups(string s)
-        {
-            List<string> groups = new List<string>();
-            int i = 0;
-            while (i < s.Length)
+            sddl = null;
+            name = chunk.Trim();
+
+            int i = chunk.IndexOf("D:(", StringComparison.Ordinal);
+            if (i < 0)
+                return;
+
+            int depth = 0;
+            bool inQuote = false;
+            int k = i + 2;   // at the '('
+            for (; k < chunk.Length; k++)
             {
-                if (s[i] != '(') { i++; continue; }
-
-                int depth = 0;
-                int start = i;
-                bool inQuote = false;
-                for (; i < s.Length; i++)
+                char c = chunk[k];
+                if (c == '"') inQuote = !inQuote;
+                else if (c == '(' && !inQuote) depth++;
+                else if (c == ')' && !inQuote)
                 {
-                    char c = s[i];
-                    if (c == '"') inQuote = !inQuote;
-                    else if (c == '(' && !inQuote) depth++;
-                    else if (c == ')' && !inQuote)
-                    {
-                        depth--;
-                        if (depth == 0) { i++; break; }
-                    }
+                    depth--;
+                    if (depth == 0) { k++; break; }
                 }
-
-                groups.Add(s.Substring(start + 1, (i - 1) - (start + 1)));
             }
-            return groups;
+
+            sddl = chunk.Substring(i, k - i);
+            string rest = chunk.Substring(k);
+
+            int cut = rest.IndexOf("Applocker Private", StringComparison.OrdinalIgnoreCase);
+            if (cut >= 0)
+                rest = rest.Substring(0, cut);
+
+            name = rest.Trim();
         }
-        
+
+        // --- SDDL -> Rule -------------------------------------------------------------------
+        private static Rule BuildRule(Record rec)
+        {
+            // rec.Sddl = D:(XA;;FX;;;SID;(condition))   -> strip "D:" and the one outer ACE paren.
+            string inner = rec.Sddl;
+            int lp = inner.IndexOf('(');
+            if (lp >= 0 && inner.EndsWith(")"))
+                inner = inner.Substring(lp + 1, inner.Length - lp - 2);
+
+            List<string> f = SplitFields(inner);
+            string action = AceTypeToAction(f.Count > 0 ? f[0] : "");
+            string sidToken = f.Count >= 6 ? f[5] : "";
+            string condition = f.Count >= 7 ? StripOneOuterParen(f[6]) : "";
+
+            Guid id;
+            Guid.TryParse(rec.Id, out id);
+
+            Rule rule = new Rule
+            {
+                Kind = KindFromCondition(condition),
+                Id = id,
+                Name = rec.Name,
+                Description = "",
+                Sid = NativeMethods.NormaliseSid(sidToken),
+                Action = action ?? "?"
+            };
+
+            List<string> inc, exc;
+            SplitCondition(condition, out inc, out exc);
+            foreach (string c in inc)
+                rule.Inclusions.Add(new Condition { Kind = "SddlCondition", Summary = c });
+            foreach (string c in exc)
+                rule.Exclusions.Add(new Condition { Kind = "SddlCondition", Summary = c });
+
+            return rule;
+        }
+
+        /// <summary>Split the ACE body on ';' at paren depth 0 (keeps the condition field intact).</summary>
         private static List<string> SplitFields(string ace)
         {
             List<string> fields = new List<string>();
@@ -204,18 +247,97 @@ namespace SharpAppLocker.Sources
             return fields;
         }
 
+        /// <summary>
+        /// Split a condition into inclusions and exclusions. Top-level "&&" conjuncts that are a
+        /// negation "(!(...))" are AppLocker exceptions; everything else is part of the inclusion.
+        /// </summary>
+        private static void SplitCondition(string cond, out List<string> inclusions, out List<string> exclusions)
+        {
+            inclusions = new List<string>();
+            exclusions = new List<string>();
+            if (string.IsNullOrEmpty(cond))
+                return;
+
+            foreach (string raw in SplitTopLevelAnd(cond))
+            {
+                string p = raw.Trim();
+                p = StripMatchedOuterParens(p);
+
+                if (p.StartsWith("!"))
+                {
+                    string inner = StripMatchedOuterParens(p.Substring(1).Trim());
+                    exclusions.Add(inner.Trim());
+                }
+                else if (p.Length > 0)
+                {
+                    inclusions.Add(p.Trim());
+                }
+            }
+        }
+
+        private static IEnumerable<string> SplitTopLevelAnd(string s)
+        {
+            List<string> parts = new List<string>();
+            StringBuilder sb = new StringBuilder();
+            int depth = 0;
+            bool inQuote = false;
+
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"') inQuote = !inQuote;
+                else if (c == '(' && !inQuote) depth++;
+                else if (c == ')' && !inQuote) depth--;
+
+                if (!inQuote && depth == 0 && c == '&' && i + 1 < s.Length && s[i + 1] == '&')
+                {
+                    parts.Add(sb.ToString());
+                    sb.Length = 0;
+                    i++;   // skip second '&'
+                    continue;
+                }
+                sb.Append(c);
+            }
+            parts.Add(sb.ToString());
+            return parts;
+        }
+
+        /// <summary>Remove exactly one matched outer paren pair, if the whole string is wrapped.</summary>
+        private static string StripMatchedOuterParens(string s)
+        {
+            s = s.Trim();
+            if (s.Length < 2 || s[0] != '(' || s[s.Length - 1] != ')')
+                return s;
+
+            int depth = 0;
+            bool inQuote = false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"') inQuote = !inQuote;
+                else if (c == '(' && !inQuote) depth++;
+                else if (c == ')' && !inQuote)
+                {
+                    depth--;
+                    if (depth == 0 && i != s.Length - 1)
+                        return s;   // first group closes before the end -> not a single wrap
+                }
+            }
+            return s.Substring(1, s.Length - 2).Trim();
+        }
+
+        private static string StripOneOuterParen(string s)
+        {
+            return StripMatchedOuterParens(s.Trim());
+        }
+
         private static string AceTypeToAction(string aceType)
         {
             switch (aceType)
             {
-                case "XA":   // SDDL_CALLBACK_ACCESS_ALLOWED
-                case "A":    // plain allow (shouldn't occur for AppLocker, handled for safety)
-                    return "Allow";
-                case "XD":   // SDDL_CALLBACK_ACCESS_DENIED
-                case "D":
-                    return "Deny";
-                default:
-                    return null;
+                case "XA": case "A": return "Allow";
+                case "XD": case "D": return "Deny";
+                default: return null;
             }
         }
 
@@ -224,24 +346,36 @@ namespace SharpAppLocker.Sources
             string c = condition.ToUpperInvariant();
             if (c.Contains("APPID://PATH")) return "FilePathRule";
             if (c.Contains("APPID://FQBN")) return "FilePublisherRule";
-            if (c.Contains("HASH")) return "FileHashRule";   // SHA256HASH / SHA1HASH / SHA256FLATHASH
+            if (c.Contains("HASH")) return "FileHashRule";
             return "UnknownRule";
         }
 
-        private static string StripOuterParens(string s)
+        // --- enforcement mode (opt-in registry read; not stored in the file) ----------------
+        private string ReadEnforcementMode(string collectionType)
         {
-            s = s.Trim();
-            if (s.Length >= 2 && s[0] == '(' && s[s.Length - 1] == ')')
-                return s.Substring(1, s.Length - 2);
-            return s;
-        }
+            if (!_useRegistry)
+                return "Unknown (not stored in .AppLocker; pass --enforcement-from-registry to read it)";
 
-        private static string HexDump(byte[] bytes, int offset, int count)
-        {
-            StringBuilder sb = new StringBuilder();
-            for (int i = offset; i < offset + count; i++)
-                sb.Append(bytes[i].ToString("X2")).Append(' ');
-            return sb.ToString().TrimEnd();
+            try
+            {
+                RegistryView view = Environment.Is64BitOperatingSystem ? RegistryView.Registry64 : RegistryView.Default;
+                using (RegistryKey hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
+                using (RegistryKey key = hklm.OpenSubKey(SrpV2Key + "\\" + collectionType))
+                {
+                    if (key == null)
+                        return "Unknown (registry key absent)";
+
+                    object raw = key.GetValue("EnforcementMode");
+                    if (raw == null) return "NotConfigured (registry)";
+                    if (raw is int && (int)raw == 0) return "AuditOnly (registry)";
+                    if (raw is int && (int)raw == 1) return "Enabled (registry)";
+                    return "Unknown(" + raw + ") (registry)";
+                }
+            }
+            catch
+            {
+                return "Unknown (registry unreadable)";
+            }
         }
     }
 }

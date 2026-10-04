@@ -7,11 +7,15 @@ namespace SharpAppLocker.Output
 {
     internal static class PolicyPrinter
     {
-        public static void Print(PolicyDocument policy, string collectionFilter, string sidFilter)
+        /// <param name="matchSids">
+        /// If non-null, only rules whose SID is in this set are shown (a principal's effective
+        /// SIDs for --me/--applies-to, or a single SID for --sid). Null = show all.
+        /// </param>
+        public static void Print(PolicyDocument policy, string collectionFilter, ISet<string> matchSids)
         {
-            string wantSid = string.IsNullOrEmpty(sidFilter) ? null : Sid.Resolve(sidFilter);
-
             Console.WriteLine("AppLocker policy (schema v" + policy.Version + ")");
+            if (matchSids != null)
+                Console.WriteLine("  (filtered to " + matchSids.Count + " SID(s))");
             if (policy.Collections.Count == 0)
                 Console.WriteLine("  No rule collections defined.");
 
@@ -22,7 +26,7 @@ namespace SharpAppLocker.Output
                     continue;
 
                 List<Rule> rules = c.Rules
-                    .Where(r => wantSid == null || r.Sid.Equals(wantSid, StringComparison.OrdinalIgnoreCase))
+                    .Where(r => matchSids == null || matchSids.Contains(r.Sid))
                     .ToList();
 
                 Console.WriteLine();
