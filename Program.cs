@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using Mono.Options;
+using SharpAppLocker.Sources;
+using SharpAppLocker.Output;
 
 /*
  * Feature TODO List
@@ -26,30 +28,30 @@ namespace SharpAppLocker
         {
             options.WriteOptionDescriptions(Console.Out);
         }
+        
+        [STAThread]
         public static void Main(string[] args)
         {
-            
-            string mode       = "com";    // com|file
-            string collection = null;     // all|exe|msi|script|dll|appx
+            string mode       = "com";
+            string collection = null;
             bool   raw        = false;
-            string sid        = null;     // filter: only rules for this SID/account ; null = all
+            string sid        = null;
             bool   help       = false;
-            string scope      = "effective";  // effective| local| domain
+            string scope      = "effective";
             string ldap       = null;
             string dir        = @"C:\Windows\System32\AppLocker";
 
             OptionSet options = new OptionSet()
                 .Add("m|mode=", "com|file (default: com)", v => mode = v)
-                .Add("c|collection=", "all|exe|msi|script|dll|appx (default: all)",        v => collection = v)
+                .Add("c|collection=", "all|exe|msi|script|dll|appx (default: all)", v => collection = v)
                 .Add("s|sid=", "only rules for this SID or account", v => sid = v)
                 .Add("r|raw", "dump raw XML (com) / SDDL (file) and exit", v => raw = v != null)
                 .Add("h|help", "show this help and exit", v => help = v != null)
-                // com mode
                 .Add("scope=", "com: effective|local|domain (default: effective)", v => scope = v)
                 .Add("ldap=", "com: LDAP path (required for --scope domain)", v => ldap = v)
-                // file mode
-                .Add("dir=", "file: folder of .AppLocker files " + "(default: %WINDIR%\\System32\\AppLocker)", v => dir = v);
+                .Add("dir=", "file: folder of .AppLocker files (default: %WINDIR%\\System32\\AppLocker)", v => dir = v);
 
+            // --- parse + validate ---
             try
             {
                 options.Parse(args);
@@ -68,7 +70,6 @@ namespace SharpAppLocker
 
                 if (mode == "file" && scope != "effective")
                     Console.Error.WriteLine("note: --scope is ignored in file mode");
-
             }
             catch (OptionException e)
             {
@@ -76,9 +77,42 @@ namespace SharpAppLocker
                 PrintUsage(options);
                 return;
             }
-            
-            
-            
+
+            // "all" means no filter; the printer expects null for that.
+            if (string.Equals(collection, "all", StringComparison.OrdinalIgnoreCase))
+                collection = null;
+
+            // --- run ---
+            try
+            {
+                IPolicySource source = BuildSource(mode, scope, ldap, dir);
+
+                if (raw)
+                {
+                    Console.WriteLine(source.LoadXml());
+                    return;
+                }
+
+                PolicyPrinter.Print(source.Load(), collection, sid);
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine("[!] {0}: {1}", e.GetType().Name, e.Message);
+            }
+        }
+
+        private static IPolicySource BuildSource(string mode, string scope, string ldap, string dir)
+        {
+            switch (mode)
+            {
+                case "com":
+                    return new ComPolicySource(scope, ldap);
+                case "file":
+                    // return new FilePolicySource(dir);
+                    throw new NotImplementedException("file mode not written yet");
+                default:
+                    throw new OptionException("Unknown mode: " + mode, "mode");
+            }
         }
     }
 }
