@@ -134,19 +134,36 @@ namespace SharpAppLocker.Model
 
     internal static class Sid
     {
+        // SID -> display string. Caches both successes and failures so an unresolvable domain SID
+        // doesn't incur a DC lookup/timeout more than once per run. Single-threaded CLI, so a plain
+        // Dictionary is fine.
+        private static readonly Dictionary<string, string> DescribeCache =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         public static string Describe(string sid)
         {
+            if (string.IsNullOrEmpty(sid)) return sid;
+
+            string cached;
+            if (DescribeCache.TryGetValue(sid, out cached))
+                return cached;
+
+            string result;
             try
             {
                 string name = new SecurityIdentifier(sid).Translate(typeof(NTAccount)).Value;
-                return name + " (" + sid + ")";
+                result = name + " (" + sid + ")";
             }
             catch
             {
-                return sid;
+                result = sid;
             }
+
+            DescribeCache[sid] = result;
+            return result;
         }
-        
+
+        // Accepts a SID or an account name ("DOMAIN\user", "Everyone") -> canonical SID string.
         public static string Resolve(string userOrSid)
         {
             if (userOrSid.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase))
