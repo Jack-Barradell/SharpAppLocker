@@ -7,8 +7,8 @@ namespace SharpAppLocker.Sources
 {
     internal sealed class ComPolicySource : IPolicySource
     {
-        private readonly string _scope;   // effective | local | domain
-        private readonly string _ldap;    // only used when scope == domain
+        private readonly string _scope;
+        private readonly string _ldap;
 
         public ComPolicySource(string scope, string ldap)
         {
@@ -26,7 +26,7 @@ namespace SharpAppLocker.Sources
                     case "effective":
                         return handler.GetEffectivePolicy();
                     case "local":
-                        return handler.GetPolicy(null);   // null LDAP path = local GPO
+                        return handler.GetPolicy(null);
                     case "domain":
                         return handler.GetPolicy(_ldap);
                     default:

@@ -31,7 +31,7 @@ namespace SharpAppLocker
             bool   enforcementFromRegistry = false;
             bool   audit      = false;
             bool   testBypass = false;
-            string action     = null;   // allow|deny filter for the listing
+            string action     = null;
             bool   json       = false;
 
             OptionSet options = new OptionSet()

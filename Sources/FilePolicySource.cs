@@ -9,20 +9,6 @@ using SharpAppLocker.Model;
 
 namespace SharpAppLocker.Sources
 {
-    /// <summary>
-    /// Reads the compiled .AppLocker policy files (one per collection, e.g. Exe.AppLocker) from
-    /// C:\Windows\System32\AppLocker - or a folder of files copied from another machine.
-    ///
-    /// The file carries a metadata section (UTF-16LE text) with one record per rule:
-    ///     {rule GUID}{per-rule SDDL "D:(...)"}{friendly name}
-    /// repeated. We parse those directly, recovering Id, Name, Action, SID and condition -
-    /// including exceptions (SDDL "&& (!(...))") and excluding the two structural LowBox/LPAC
-    /// ACEs at the tail (they carry no GUID, so the GUID-anchored scan skips them).
-    ///
-    /// EnforcementMode is NOT stored in these files; it lives in the registry and AppCache.dat.
-    /// Reading it is opt-in (--enforcement-from-registry) and off by default, so file mode stays
-    /// a pure file parser unless you ask otherwise.
-    /// </summary>
     internal sealed class FilePolicySource : IPolicySource
     {
         private const string SrpV2Key = @"SOFTWARE\Policies\Microsoft\Windows\SrpV2";
@@ -39,8 +25,7 @@ namespace SharpAppLocker.Sources
             _dir = dir;
             _useRegistry = useRegistry;
         }
-
-        // --- raw view: the metadata records (GUID / SDDL / name) per file --------------------
+        
         public string LoadXml()
         {
             StringBuilder sb = new StringBuilder();
@@ -57,15 +42,14 @@ namespace SharpAppLocker.Sources
             }
             return sb.ToString();
         }
-
-        // --- parsed view: into the shared model ---------------------------------------------
+        
         public PolicyDocument Load()
         {
             PolicyDocument doc = new PolicyDocument { Version = "1 (from file)" };
 
             foreach (string file in EnumerateFiles())
             {
-                string type = Path.GetFileNameWithoutExtension(file);   // Exe.AppLocker -> Exe
+                string type = Path.GetFileNameWithoutExtension(file);
                 RuleCollection collection = new RuleCollection
                 {
                     Type = type,
@@ -87,15 +71,9 @@ namespace SharpAppLocker.Sources
             }
             return doc;
         }
-
-        // --- file discovery -----------------------------------------------------------------
+        
         private IEnumerable<string> EnumerateFiles()
         {
-            if (!Environment.Is64BitProcess && Environment.Is64BitOperatingSystem)
-                Console.Error.WriteLine(
-                    "[!] warning: running 32-bit on 64-bit Windows - System32 is redirected to SysWOW64. " +
-                    "Build x64, or use C:\\Windows\\Sysnative instead of System32.");
-
             if (!Directory.Exists(_dir))
                 throw new DirectoryNotFoundException("AppLocker folder not found: " + _dir);
 
@@ -107,12 +85,9 @@ namespace SharpAppLocker.Sources
 
         private static string ReadUtf16(string file)
         {
-            // Decode the whole file as UTF-16LE; binary sections become noise but the metadata
-            // records (GUID/SDDL/name) are plain text and are what we scan for.
             return Encoding.Unicode.GetString(File.ReadAllBytes(file));
         }
-
-        // --- metadata record extraction -----------------------------------------------------
+        
         private sealed class Record
         {
             public string Id;
@@ -141,12 +116,7 @@ namespace SharpAppLocker.Sources
             }
             return records;
         }
-
-        /// <summary>
-        /// A chunk after a GUID looks like: D:(....)) &lt;friendly name&gt;.
-        /// Balance-match the SDDL from "D:(" to its closing paren; the rest is the name,
-        /// trimmed where the trailing structural ACE text ("Applocker Private...") begins.
-        /// </summary>
+        
         private static void SplitSddlAndName(string chunk, out string sddl, out string name)
         {
             sddl = null;
@@ -180,11 +150,9 @@ namespace SharpAppLocker.Sources
 
             name = rest.Trim();
         }
-
-        // --- SDDL -> Rule -------------------------------------------------------------------
+        
         private static Rule BuildRule(Record rec)
         {
-            // rec.Sddl = D:(XA;;FX;;;SID;(condition))   -> strip "D:" and the one outer ACE paren.
             string inner = rec.Sddl;
             int lp = inner.IndexOf('(');
             if (lp >= 0 && inner.EndsWith(")"))
@@ -217,8 +185,7 @@ namespace SharpAppLocker.Sources
 
             return rule;
         }
-
-        /// <summary>Split the ACE body on ';' at paren depth 0 (keeps the condition field intact).</summary>
+        
         private static List<string> SplitFields(string ace)
         {
             List<string> fields = new List<string>();
@@ -246,11 +213,7 @@ namespace SharpAppLocker.Sources
             fields.Add(sb.ToString());
             return fields;
         }
-
-        /// <summary>
-        /// Split a condition into inclusions and exclusions. Top-level "&&" conjuncts that are a
-        /// negation "(!(...))" are AppLocker exceptions; everything else is part of the inclusion.
-        /// </summary>
+        
         private static void SplitCondition(string cond, out List<string> inclusions, out List<string> exclusions)
         {
             inclusions = new List<string>();
@@ -293,7 +256,7 @@ namespace SharpAppLocker.Sources
                 {
                     parts.Add(sb.ToString());
                     sb.Length = 0;
-                    i++;   // skip second '&'
+                    i++;
                     continue;
                 }
                 sb.Append(c);
@@ -301,8 +264,7 @@ namespace SharpAppLocker.Sources
             parts.Add(sb.ToString());
             return parts;
         }
-
-        /// <summary>Remove exactly one matched outer paren pair, if the whole string is wrapped.</summary>
+        
         private static string StripMatchedOuterParens(string s)
         {
             s = s.Trim();
@@ -320,7 +282,7 @@ namespace SharpAppLocker.Sources
                 {
                     depth--;
                     if (depth == 0 && i != s.Length - 1)
-                        return s;   // first group closes before the end -> not a single wrap
+                        return s;
                 }
             }
             return s.Substring(1, s.Length - 2).Trim();
@@ -349,12 +311,11 @@ namespace SharpAppLocker.Sources
             if (c.Contains("HASH")) return "FileHashRule";
             return "UnknownRule";
         }
-
-        // --- enforcement mode (opt-in registry read; not stored in the file) ----------------
+        
         private string ReadEnforcementMode(string collectionType)
         {
             if (!_useRegistry)
-                return "Unknown (not stored in .AppLocker; pass --enforcement-from-registry to read it)";
+                return "Unknown (not stored in .AppLocker; Use --enforcement-from-registry to read it)";
 
             try
             {
@@ -363,7 +324,7 @@ namespace SharpAppLocker.Sources
                 using (RegistryKey key = hklm.OpenSubKey(SrpV2Key + "\\" + collectionType))
                 {
                     if (key == null)
-                        return "Unknown (registry key absent)";
+                        return "Unknown (registry key not found)";
 
                     object raw = key.GetValue("EnforcementMode");
                     if (raw == null) return "NotConfigured (registry)";

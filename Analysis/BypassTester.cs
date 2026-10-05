@@ -14,29 +14,14 @@ namespace SharpAppLocker.Analysis
         public string Collection;
         public Guid RuleId;
         public string RuleName;
-        public string RulePath;    // the allow rule's path condition
-        public string DropPath;    // the concrete location the user could write to
-        public string Kind;        // REPLACE-EXISTING / NEW-FILE-IN-DIR / CREATE-MISSING / REMOVABLE-MEDIA
+        public string RulePath;
+        public string DropPath;
+        public string Kind;
         public string Detail;
     }
-
-    /// <summary>
-    /// Tests whether Allow path rules are *actually* exploitable, by checking the filesystem ACLs
-    /// along each allowed location for the target principal's SIDs. A rule is only a real bypass if
-    /// the user can place (or replace) an executable somewhere the rule covers and no Deny path rule
-    /// covers that same location.
-    ///
-    /// Runs against the LOCAL filesystem, so it is meaningful only for the live local policy - not
-    /// for .AppLocker files copied from another machine (their ACLs are not these ACLs).
-    ///
-    /// Effective access is approximated as (allowed rights) &amp; ~(denied rights) over the SID set,
-    /// which errs towards under-reporting rather than false positives. Confirm critical cases with
-    /// accesschk / Effective Access.
-    /// </summary>
+    
     internal static class BypassTester
     {
-        // Classic user-writable subdirectories beneath the Windows folder, relative to %WINDIR%.
-        // A recursive allow such as "%WINDIR%\*" implicitly covers these.
         private static readonly string[] WritableUnderWindows =
         {
             @"Tasks", @"Temp", @"tracing", @"Registration\CRMLog",
@@ -55,8 +40,7 @@ namespace SharpAppLocker.Analysis
                 if (collectionFilter != null &&
                     !c.Type.Equals(collectionFilter, StringComparison.OrdinalIgnoreCase))
                     continue;
-
-                // Deny path rules that apply to this principal - a drop path covered by one is blocked.
+                
                 List<string> denyPaths = c.Rules
                     .Where(r => r.Action == "Deny" && r.Kind == "FilePathRule" && Applies(r, targetSids))
                     .SelectMany(r => r.Inclusions.Select(PathValue))
@@ -84,8 +68,7 @@ namespace SharpAppLocker.Analysis
 
             return results.OrderBy(r => (int)r.Severity).ThenBy(r => r.Collection).ToList();
         }
-
-        // --- per-rule testing ---------------------------------------------------------------
+        
         private static IEnumerable<BypassResult> TestRulePath(
             RuleCollection c, Rule r, string rulePath, ISet<string> targetSids, List<string> denyPaths)
         {
@@ -94,7 +77,6 @@ namespace SharpAppLocker.Analysis
             string upper = rulePath.ToUpperInvariant();
             if (upper.Contains("%REMOVABLE%") || upper.Contains("%HOT%"))
             {
-                // Removable / hot-plug media: user-writable by nature, no fixed ACL to read.
                 Add(found, Severity.Medium, c, r, rulePath, rulePath, "REMOVABLE-MEDIA",
                     "Allows execution from removable/hot-plug media, which the user fully controls.");
                 return found;
@@ -102,7 +84,7 @@ namespace SharpAppLocker.Analysis
 
             string expanded = ExpandMacros(rulePath);
             if (expanded == null)
-                return found;   // unknown macro; skip
+                return found;
 
             bool wildcard = expanded.IndexOf('*') >= 0;
             bool recursive = expanded.TrimEnd('\\').EndsWith(@"\*") || expanded.EndsWith(@"\*");
@@ -111,7 +93,6 @@ namespace SharpAppLocker.Analysis
 
             if (!wildcard)
             {
-                // Specific file: replaceable if the file exists and is writable, or its parent allows create.
                 if (File.Exists(expanded))
                 {
                     if (CanReplaceFile(expanded, targetSids) && !BlockedByDeny(expanded, denyPaths))
@@ -124,8 +105,7 @@ namespace SharpAppLocker.Analysis
                 }
                 return found;
             }
-
-            // Wildcard rule -> a directory (subtree) is covered.
+            
             if (Directory.Exists(fixedDir))
             {
                 if (CanCreateFile(fixedDir, targetSids) && !BlockedByDeny(fixedDir, denyPaths))
@@ -147,7 +127,6 @@ namespace SharpAppLocker.Analysis
             List<BypassResult> found, RuleCollection c, Rule r, string rulePath,
             string baseDir, ISet<string> targetSids, List<string> denyPaths)
         {
-            // Only meaningful when baseDir is the Windows folder (or an ancestor of these subdirs).
             string windir = Environment.GetEnvironmentVariable("windir") ?? @"C:\Windows";
             if (!baseDir.TrimEnd('\\').Equals(windir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
                 return;
@@ -167,8 +146,6 @@ namespace SharpAppLocker.Analysis
             List<BypassResult> found, RuleCollection c, Rule r, string rulePath,
             string target, ISet<string> targetSids, List<string> denyPaths)
         {
-            // Walk up to the nearest existing ancestor; if the user can create there, they can
-            // materialise the missing path and drop an executable that matches the rule.
             string ancestor = NearestExistingAncestor(target);
             if (ancestor == null)
                 return;
@@ -177,8 +154,7 @@ namespace SharpAppLocker.Analysis
                 Add(found, Severity.High, c, r, rulePath, target, "CREATE-MISSING",
                     "The allowed path does not exist yet, but the user can create it under " + ancestor + ".");
         }
-
-        // --- ACL checks ---------------------------------------------------------------------
+        
         private static bool CanCreateFile(string dir, ISet<string> sids)
         {
             FileSystemRights eff = EffectiveRights(dir, true, sids);
@@ -199,8 +175,7 @@ namespace SharpAppLocker.Analysis
             if (Has(eff, FileSystemRights.WriteData) || Has(eff, FileSystemRights.Modify)
                 || Has(eff, FileSystemRights.FullControl) || Has(eff, FileSystemRights.Delete))
                 return true;
-
-            // Or delete-and-recreate via the parent directory.
+            
             string parent = Path.GetDirectoryName(file);
             if (parent != null && Directory.Exists(parent))
             {
@@ -210,11 +185,7 @@ namespace SharpAppLocker.Analysis
             }
             return false;
         }
-
-        /// <summary>
-        /// Approximate effective rights for the SID set: union of Allow rights minus union of Deny
-        /// rights found in the DACL. Conservative (any matching deny removes the right).
-        /// </summary>
+        
         private static FileSystemRights EffectiveRights(string path, bool isDirectory, ISet<string> sids)
         {
             try
@@ -247,7 +218,7 @@ namespace SharpAppLocker.Analysis
             }
             catch
             {
-                return 0;   // can't read the ACL -> treat as no access (conservative)
+                return 0;
             }
         }
 
@@ -255,8 +226,7 @@ namespace SharpAppLocker.Analysis
         {
             return (value & flag) == flag;
         }
-
-        // --- path helpers -------------------------------------------------------------------
+        
         private static bool BlockedByDeny(string dropPath, List<string> denyPaths)
         {
             string p = dropPath.ToUpperInvariant();
@@ -283,7 +253,6 @@ namespace SharpAppLocker.Analysis
         private static string NearestExistingAncestor(string path)
         {
             string cur = path;
-            // if it's a file-ish leaf, start from its directory
             if (!cur.EndsWith("\\") && Path.GetExtension(cur).Length > 0)
                 cur = Path.GetDirectoryName(cur);
 
@@ -297,8 +266,7 @@ namespace SharpAppLocker.Analysis
             }
             return null;
         }
-
-        /// <summary>Expand AppLocker path macros to a concrete local path, or null if unknown.</summary>
+        
         private static string ExpandMacros(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
@@ -316,7 +284,7 @@ namespace SharpAppLocker.Analysis
             p = ReplaceCi(p, "%PROGRAMDATA%", programData);
 
             if (p.IndexOf('%') >= 0)
-                return null;   // some macro we don't expand (e.g. %REMOVABLE% handled earlier)
+                return null;
 
             return p;
         }

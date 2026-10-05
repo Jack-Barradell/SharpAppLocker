@@ -6,7 +6,6 @@ using System.Text;
 
 namespace SharpAppLocker.Output
 {
-    /// <summary>Minimal dependency-free JSON writer (string/bool/number/Guid/list/dictionary).</summary>
     internal static class Json
     {
         public static string Serialize(object o)

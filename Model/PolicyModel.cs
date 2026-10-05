@@ -15,26 +15,26 @@ namespace SharpAppLocker.Model
 
     internal sealed class RuleCollection
     {
-        public string Type; // Exe|Msi|Script|Dll|Appx
-        public string EnforcementMode; // NotConfigured|AuditOnly|Enabled
+        public string Type;
+        public string EnforcementMode;
         public List<Rule> Rules = new List<Rule>();
     }
 
     internal sealed class Rule
     {
-        public string Kind; // FilePathRule|FilePublisherRule|FileHashRule
+        public string Kind;
         public Guid Id;
         public string Name;
         public string Description;
         public string Sid;
-        public string Action; // Allow|Deny
+        public string Action;
         public List<Condition> Inclusions = new List<Condition>();
         public List<Condition> Exclusions = new List<Condition>();
     }
 
     internal sealed class Condition
     {
-        public string Kind; // FilePathCondition|FilePublisherCondition|FileHashCondition
+        public string Kind;
         public string Summary;
     }
 

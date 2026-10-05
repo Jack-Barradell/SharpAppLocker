@@ -7,8 +7,6 @@ namespace SharpAppLocker.Output
 {
     internal static class PolicyPrinter
     {
-        /// <param name="matchSids">null = all SIDs; otherwise only rules whose SID is in the set.</param>
-        /// <param name="action">null = both; "allow"/"deny" to filter.</param>
         public static void Print(PolicyDocument policy, string collectionFilter, ISet<string> matchSids, string action)
         {
             Console.WriteLine("AppLocker policy (schema v" + policy.Version + ")");
