@@ -55,14 +55,27 @@ namespace SharpAppLocker.Output
 
         public static void PrintFindings(List<Finding> findings)
         {
-            List<object> items = findings.Select(f => (object)new Dictionary<string, object>
+            List<object> items = findings.Select(f =>
             {
-                { "severity", f.Severity.ToString() },
-                { "category", f.Category },
-                { "collection", f.Collection },
-                { "ruleId", f.RuleId },
-                { "ruleName", f.RuleName },
-                { "detail", f.Detail },
+                Dictionary<string, object> item = new Dictionary<string, object>
+                {
+                    { "severity", f.Severity.ToString() },
+                    { "category", f.Category },
+                    { "collection", f.Collection },
+                    { "ruleId", f.RuleId },
+                    { "ruleName", f.RuleName },
+                    { "detail", f.Detail },
+                };
+                if (f.OffendingRule != null)
+                {
+                    item["action"] = f.OffendingRule.Action;
+                    item["kind"] = f.OffendingRule.Kind;
+                    item["sid"] = f.OffendingRule.Sid;
+                    item["sidName"] = Sid.Describe(f.OffendingRule.Sid);
+                    item["inclusions"] = f.OffendingRule.Inclusions.Select(x => (object)x.Summary).ToList();
+                    item["exclusions"] = f.OffendingRule.Exclusions.Select(x => (object)x.Summary).ToList();
+                }
+                return (object)item;
             }).ToList();
             Console.WriteLine(Json.Serialize(items));
         }
