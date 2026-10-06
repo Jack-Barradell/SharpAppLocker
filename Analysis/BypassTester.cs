@@ -22,6 +22,8 @@ namespace SharpAppLocker.Analysis
     
     internal static class BypassTester
     {
+        private static readonly char[] WildcardChars = { '*', '?' };
+        
         private static readonly string[] WritableUnderWindows =
         {
             @"Tasks", @"Temp", @"tracing", @"Registration\CRMLog",
@@ -45,8 +47,7 @@ namespace SharpAppLocker.Analysis
                     .Where(r => r.Action == "Deny" && r.Kind == "FilePathRule" && Applies(r, targetSids))
                     .SelectMany(r => r.Inclusions.Select(PathValue))
                     .Where(p => !string.IsNullOrEmpty(p))
-                    .Select(ExpandMacros)
-                    .Where(p => p != null)
+                    .SelectMany(ExpandMacros)
                     .ToList();
 
                 foreach (Rule r in c.Rules)
@@ -81,15 +82,18 @@ namespace SharpAppLocker.Analysis
                     "Allows execution from removable/hot-plug media, which the user fully controls.");
                 return found;
             }
+            
+            foreach (string expanded in ExpandMacros(rulePath))
+                TestExpandedPath(found, c, r, rulePath, expanded, targetSids, denyPaths);
 
-            string expanded = ExpandMacros(rulePath);
-            if (expanded == null)
-                return found;
+            return found;
+        }
 
-            bool wildcard = expanded.IndexOf('*') >= 0;
-            bool recursive = expanded.TrimEnd('\\').EndsWith(@"\*") || expanded.EndsWith(@"\*");
-
-            string fixedDir = FixedDirectoryOf(expanded, wildcard);
+        private static void TestExpandedPath(
+            List<BypassResult> found, RuleCollection c, Rule r, string rulePath,
+            string expanded, ISet<string> targetSids, List<string> denyPaths)
+        {
+            bool wildcard = HasWildcard(expanded);
 
             if (!wildcard)
             {
@@ -101,11 +105,14 @@ namespace SharpAppLocker.Analysis
                 }
                 else
                 {
-                    TestMissing(found, c, r, rulePath, expanded, targetSids, denyPaths);
+                    TestMissing(found, c, r, rulePath, expanded, true, targetSids, denyPaths);
                 }
-                return found;
+                return;
             }
             
+            string fixedDir = FixedDirectoryOf(expanded);
+            bool recursive = expanded.TrimEnd('\\').EndsWith(@"\*", StringComparison.Ordinal);
+
             if (Directory.Exists(fixedDir))
             {
                 if (CanCreateFile(fixedDir, targetSids) && !BlockedByDeny(fixedDir, denyPaths))
@@ -117,10 +124,8 @@ namespace SharpAppLocker.Analysis
             }
             else
             {
-                TestMissing(found, c, r, rulePath, fixedDir, targetSids, denyPaths);
+                TestMissing(found, c, r, rulePath, fixedDir, false, targetSids, denyPaths);
             }
-
-            return found;
         }
 
         private static void TestKnownWritableSubdirs(
@@ -144,15 +149,31 @@ namespace SharpAppLocker.Analysis
 
         private static void TestMissing(
             List<BypassResult> found, RuleCollection c, Rule r, string rulePath,
-            string target, ISet<string> targetSids, List<string> denyPaths)
+            string target, bool targetIsFile, ISet<string> targetSids, List<string> denyPaths)
         {
             string ancestor = NearestExistingAncestor(target);
             if (ancestor == null)
                 return;
 
-            if (CanCreateDirectory(ancestor, targetSids) && !BlockedByDeny(target, denyPaths))
-                Add(found, Severity.High, c, r, rulePath, target, "CREATE-MISSING",
-                    "The allowed path does not exist yet, but the user can create it under " + ancestor + ".");
+            if (BlockedByDeny(target, denyPaths))
+                return;
+
+            string parent = Path.GetDirectoryName(target.TrimEnd('\\'));
+            bool directParent = parent != null &&
+                                ancestor.TrimEnd('\\').Equals(parent.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+
+            if (targetIsFile && directParent)
+            {
+                if (CanCreateFile(ancestor, targetSids))
+                    Add(found, Severity.High, c, r, rulePath, target, "CREATE-MISSING-FILE",
+                        "The allowed file does not exist, but the user can create it directly in " + ancestor + ".");
+            }
+            else
+            {
+                if (CanCreateDirectory(ancestor, targetSids))
+                    Add(found, Severity.High, c, r, rulePath, target, "CREATE-MISSING",
+                        "The allowed path does not exist yet, but the user can create it under " + ancestor + ".");
+            }
         }
         
         private static bool CanCreateFile(string dir, ISet<string> sids)
@@ -227,24 +248,29 @@ namespace SharpAppLocker.Analysis
             return (value & flag) == flag;
         }
         
+        private static bool HasWildcard(string s)
+        {
+            return s.IndexOfAny(WildcardChars) >= 0;
+        }
+
         private static bool BlockedByDeny(string dropPath, List<string> denyPaths)
         {
             string p = dropPath.ToUpperInvariant();
             foreach (string d in denyPaths)
             {
-                string dd = d.ToUpperInvariant().TrimEnd('*').TrimEnd('\\');
+                string dd = d.ToUpperInvariant().TrimEnd('*', '?').TrimEnd('\\');
                 if (dd.Length > 0 && p.StartsWith(dd, StringComparison.Ordinal))
                     return true;
             }
             return false;
         }
 
-        private static string FixedDirectoryOf(string expanded, bool wildcard)
+        private static string FixedDirectoryOf(string expanded)
         {
-            if (!wildcard)
+            int star = expanded.IndexOfAny(WildcardChars);
+            if (star < 0)
                 return Path.GetDirectoryName(expanded) ?? expanded;
 
-            int star = expanded.IndexOf('*');
             string head = expanded.Substring(0, star);
             int slash = head.LastIndexOf('\\');
             return slash >= 0 ? head.Substring(0, slash) : head;
@@ -267,26 +293,47 @@ namespace SharpAppLocker.Analysis
             return null;
         }
         
-        private static string ExpandMacros(string path)
+        private static List<string> ExpandMacros(string path)
         {
-            if (string.IsNullOrEmpty(path)) return null;
+            List<string> results = new List<string>();
+            if (string.IsNullOrEmpty(path))
+                return results;
 
             string windir = Environment.GetEnvironmentVariable("windir") ?? @"C:\Windows";
             string sysDrive = Environment.GetEnvironmentVariable("SystemDrive") ?? "C:";
-            string pf = Environment.GetEnvironmentVariable("ProgramFiles") ?? @"C:\Program Files";
-            string programData = Environment.GetEnvironmentVariable("ProgramData") ?? @"C:\ProgramData";
-
+            string pf64 = Environment.GetEnvironmentVariable("ProgramW6432")
+                          ?? Environment.GetEnvironmentVariable("ProgramFiles") ?? @"C:\Program Files";
+            string pf86 = Environment.GetEnvironmentVariable("ProgramFiles(x86)");
+            
             string p = path;
-            p = ReplaceCi(p, "%WINDIR%", windir);
             p = ReplaceCi(p, "%SYSTEM32%", windir + @"\System32");
+            p = ReplaceCi(p, "%WINDIR%", windir);
             p = ReplaceCi(p, "%OSDRIVE%", sysDrive);
-            p = ReplaceCi(p, "%PROGRAMFILES%", pf);
-            p = ReplaceCi(p, "%PROGRAMDATA%", programData);
+            
+            if (ContainsCi(p, "%PROGRAMFILES%"))
+            {
+                List<string> pfs = new List<string> { pf64 };
+                if (!string.IsNullOrEmpty(pf86) && !pf86.Equals(pf64, StringComparison.OrdinalIgnoreCase))
+                    pfs.Add(pf86);
 
-            if (p.IndexOf('%') >= 0)
-                return null;
+                foreach (string pf in pfs)
+                {
+                    string q = ReplaceCi(p, "%PROGRAMFILES%", pf);
+                    if (q.IndexOf('%') < 0)
+                        results.Add(q);
+                }
+            }
+            else if (p.IndexOf('%') < 0)
+            {
+                results.Add(p);
+            }
 
-            return p;
+            return results;
+        }
+
+        private static bool ContainsCi(string input, string token)
+        {
+            return input.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string ReplaceCi(string input, string token, string replacement)

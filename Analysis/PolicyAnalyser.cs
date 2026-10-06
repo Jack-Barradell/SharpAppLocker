@@ -33,13 +33,13 @@ namespace SharpAppLocker.Analysis
             "S-1-5-4",
             "S-1-5-32-546",
         };
-        
+
         private static readonly HashSet<string> AdminAudience = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "S-1-5-32-544",
             "S-1-5-18",
         };
-        
+
         private static readonly HashSet<int> BroadDomainRids = new HashSet<int> { 513, 514 };
         private static readonly HashSet<int> AdminDomainRids = new HashSet<int> { 512, 518, 519 };
 
@@ -52,6 +52,8 @@ namespace SharpAppLocker.Analysis
                 if (collectionFilter != null &&
                     !c.Type.Equals(collectionFilter, StringComparison.OrdinalIgnoreCase))
                     continue;
+
+                AnalyseEnforcement(c, findings);
 
                 foreach (Rule r in c.Rules)
                 {
@@ -120,7 +122,6 @@ namespace SharpAppLocker.Analysis
                 return;
 
             bool admin = IsAdminAudience(r.Sid);
-
             if (c.Type.Equals("Appx", StringComparison.OrdinalIgnoreCase))
             {
                 Add(findings, Severity.Info, "PUBLISHER-ANY-SIGNED", c, r,
@@ -133,7 +134,7 @@ namespace SharpAppLocker.Analysis
                     " - any Authenticode-signed binary runs, including signed living-off-the-land tools.");
             }
         }
-
+        
         private static bool IsBroadAudience(string sid)
         {
             if (sid == null) return false;
@@ -158,9 +159,13 @@ namespace SharpAppLocker.Analysis
 
         private static bool IsBroadRoot(string path)
         {
-            if (!path.EndsWith(@"\*"))
+            int wc = path.IndexOfAny(new[] { '*', '?' });
+            if (wc < 0)
                 return false;
-            string head = path.Substring(0, path.Length - 2);
+
+            string prefix = path.Substring(0, wc);
+            int slash = prefix.LastIndexOf('\\');
+            string head = slash >= 0 ? prefix.Substring(0, slash) : "";
             int segments = head.Split('\\').Count(s => s.Length > 0);
             return segments <= 2;
         }
@@ -208,6 +213,39 @@ namespace SharpAppLocker.Analysis
         private static string ExceptionNote(Rule r)
         {
             return r.Exclusions.Count > 0 ? "  [has " + r.Exclusions.Count + " exception(s)]" : "";
+        }
+
+        private static void AnalyseEnforcement(RuleCollection c, List<Finding> findings)
+        {
+            if (c.Rules.Count == 0)
+                return;
+
+            string m = (c.EnforcementMode ?? "").Trim();
+            if (m.StartsWith("Enabled", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (m.StartsWith("AuditOnly", StringComparison.OrdinalIgnoreCase))
+                AddCollection(findings, Severity.Medium, "NOT-ENFORCED", c,
+                    c.Rules.Count + " rule(s) present but EnforcementMode is AuditOnly - nothing is blocked, only logged.");
+            else if (m.StartsWith("NotConfigured", StringComparison.OrdinalIgnoreCase))
+                AddCollection(findings, Severity.Medium, "NOT-ENFORCED", c,
+                    c.Rules.Count + " rule(s) present but EnforcementMode is NotConfigured - the rules have no effect unless another GPO enables this collection.");
+            else
+                AddCollection(findings, Severity.Info, "ENFORCEMENT-UNKNOWN", c,
+                    c.Rules.Count + " rule(s) present; EnforcementMode is '" + m + "' - cannot confirm this collection is enforced.");
+        }
+
+        private static void AddCollection(List<Finding> list, Severity sev, string cat, RuleCollection c, string detail)
+        {
+            list.Add(new Finding
+            {
+                Severity = sev,
+                Category = cat,
+                Collection = c.Type,
+                RuleId = Guid.Empty,
+                RuleName = "(collection)",
+                Detail = detail
+            });
         }
 
         private static void Add(List<Finding> list, Severity sev, string cat, RuleCollection c, Rule r, string detail)
